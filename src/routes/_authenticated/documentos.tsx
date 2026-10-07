@@ -1,0 +1,9 @@
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { FileText, Files } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { PageHeader,Empty } from "@/components/brand";
+import { Button } from "@/components/ui/button";
+import { Tabs,TabsList,TabsTrigger } from "@/components/ui/tabs";
+export const Route=createFileRoute("/_authenticated/documentos")({head:()=>({meta:[{title:"Documentos — Shopping Hospitalar"},{name:"description",content:"Biblioteca de documentos e DAVs."},{property:"og:title",content:"Documentos — Shopping Hospitalar"},{property:"og:description",content:"Biblioteca de documentos e DAVs."},{property:"og:type",content:"website"},{name:"twitter:card",content:"summary_large_image"}]}),component:Page});
+function Page(){const{data=[]}=useQuery({queryKey:["documents"],queryFn:async()=>{const{data,error}=await supabase.from("documents").select("*").order("created_at",{ascending:false});if(error)throw error;return data??[]}});return <><PageHeader title="Documentos" subtitle="Arquivos, materiais e DAVs da empresa." action={<Button asChild><Link to="/davs"><Files className="h-4 w-4"/>Abrir DAVs</Link></Button>}/><Tabs value="documents" className="mb-5"><TabsList><TabsTrigger value="documents">Documentos gerais</TabsTrigger><Button asChild variant="ghost" size="sm"><Link to="/davs">DAVs</Link></Button></TabsList></Tabs>{data.length?<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.map(x=><article key={x.id} className="flex gap-3 rounded-xl border bg-card p-4 shadow-card"><FileText className="h-8 w-8 text-highlight"/><div><h2 className="font-semibold">{x.title}</h2><p className="text-xs text-muted-foreground">{x.category||"Documento"}</p></div></article>)}</div>:<Empty text="Nenhum documento disponível."/>}</>}
