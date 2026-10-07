@@ -93,6 +93,8 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
+  const [tab, setTab] = useState<"conversations" | "contacts">("conversations");
+
   const {
     data: profiles = [],
     isError: profilesError,
@@ -111,9 +113,11 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
     },
     refetchInterval: 30_000,
   });
+
   const {
     data: memberships = [],
     isError: membershipsError,
+    isLoading: membershipsLoading,
     isFetching: membershipsFetching,
     refetch: refetchMemberships,
   } = useQuery({
@@ -132,6 +136,25 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
     },
     refetchInterval: 15_000,
   });
+
+  // Dedicated query when opening a specific conversation so it doesn't wait for the full list
+  const { data: directConversation, isLoading: directLoading } = useQuery({
+    queryKey: ["chat-conversation-single", conversationId, me?.profile?.id],
+    enabled: !!conversationId && !!me?.profile?.id,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("chat_participants")
+        .select(
+          "conversation_id,is_admin,muted,pinned,last_read_at,chat_conversations(id,name,kind,image_url,updated_at,created_by)",
+        )
+        .eq("conversation_id", conversationId!)
+        .eq("user_id", me?.profile?.id ?? "")
+        .maybeSingle();
+      if (error) throw error;
+      return data as ConversationRow | null;
+    },
+  });
+
   const conversationIds = memberships.map((x) => x.conversation_id);
   const { data: allParticipants = [] } = useQuery({
     queryKey: ["chat-participants", conversationIds.join(",")],
@@ -148,11 +171,33 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
     },
     refetchInterval: 15_000,
   });
+
+  const { data: singleParticipants = [] } = useQuery({
+    queryKey: ["chat-participants-single", conversationId],
+    enabled: !!conversationId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("chat_participants")
+        .select(
+          "conversation_id,user_id,is_admin,profiles(id,full_name,avatar_url,status,last_seen_at)",
+        )
+        .eq("conversation_id", conversationId!);
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
+  const otherProfiles = profiles.filter((p) => p.id !== me?.profile?.id);
+  const filteredContacts = otherProfiles.filter((p) =>
+    p.full_name.toLowerCase().includes(search.toLowerCase()),
+  );
+
   const filtered = memberships.filter((m) =>
     conversationTitle(m, allParticipants, me?.profile?.id)
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+
   useEffect(() => {
     const channel = supabase
       .channel("chat-list-live")
@@ -170,20 +215,73 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
       void supabase.removeChannel(channel);
     };
   }, [qc]);
-  const active = memberships.find((x) => x.conversation_id === conversationId);
+
+  const active =
+    memberships.find((x) => x.conversation_id === conversationId) ?? directConversation;
+
+  const currentParticipants =
+    allParticipants.filter((p) => p.conversation_id === conversationId).length > 0
+      ? allParticipants.filter((p) => p.conversation_id === conversationId)
+      : singleParticipants;
+
+  async function handleStartDirect(peerId: string) {
+    await openOrCreateDirectChat({ peerId, qc, navigate });
+  }
+
   return (
-    <div className="overflow-hidden rounded-lg border bg-card shadow-card lg:grid lg:h-[calc(100vh-7.5rem)] lg:grid-cols-[320px_minmax(0,1fr)]">
-      <aside className={cn("border-r", conversationId && "hidden lg:block")}>
+    <div className="overflow-hidden rounded-lg border bg-card shadow-card lg:grid lg:h-[calc(100vh-7.5rem)] lg:grid-cols-[330px_minmax(0,1fr)]">
+      <aside className={cn("flex flex-col border-r bg-card", conversationId && "hidden lg:flex")}>
         <div className="flex h-16 items-center justify-between border-b px-4">
           <div>
-            <h1 className="font-bold">Chat</h1>
-            <p className="text-xs text-muted-foreground">{memberships.length} conversas</p>
+            <h1 className="text-lg font-bold">Chat</h1>
+            <p className="text-xs text-muted-foreground">
+              {tab === "conversations"
+                ? `${memberships.length} conversa${memberships.length === 1 ? "" : "s"}`
+                : `${otherProfiles.length} contato${otherProfiles.length === 1 ? "" : "s"}`}
+            </p>
           </div>
           <NewConversationDialog
-            profiles={profiles.filter((p) => p.id !== me?.profile?.id)}
+            profiles={otherProfiles}
             userId={me?.profile?.id}
+            trigger={
+              <Button size="sm" className="gap-1.5 shadow-sm">
+                <Plus className="h-4 w-4" />
+                <span>Nova conversa</span>
+              </Button>
+            }
           />
         </div>
+
+        {/* Abas Alternáveis: Conversas vs Contatos */}
+        <div className="grid grid-cols-2 border-b bg-muted/20 text-center text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => setTab("conversations")}
+            className={cn(
+              "flex items-center justify-center gap-1.5 py-2.5 transition-colors border-b-2",
+              tab === "conversations"
+                ? "border-primary text-primary bg-background shadow-xs"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <MessageCircle className="h-3.5 w-3.5" />
+            Conversas ({memberships.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("contacts")}
+            className={cn(
+              "flex items-center justify-center gap-1.5 py-2.5 transition-colors border-b-2",
+              tab === "contacts"
+                ? "border-primary text-primary bg-background shadow-xs"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Users className="h-3.5 w-3.5" />
+            Contatos ({otherProfiles.length})
+          </button>
+        </div>
+
         <div className="p-3">
           <div className="relative">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -191,23 +289,63 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="h-9 pl-9"
-              placeholder="Buscar conversa"
+              placeholder={tab === "conversations" ? "Buscar conversa..." : "Buscar colega..."}
             />
           </div>
         </div>
-        <ScrollArea className="h-[calc(100vh-14rem)] lg:h-[calc(100vh-14rem)]">
+
+        <ScrollArea className="flex-1 h-[calc(100vh-17.5rem)] lg:h-[calc(100vh-17.5rem)]">
           <div className="space-y-1 px-2 pb-3">
-            {membershipsError ? (
+            {tab === "contacts" ? (
+              profilesError ? (
+                <div className="space-y-3 px-4 py-8 text-center text-sm">
+                  <p className="text-destructive">Não foi possível carregar os colaboradores.</p>
+                  <Button variant="outline" size="sm" onClick={() => void refetchProfiles()}>
+                    Tentar novamente
+                  </Button>
+                </div>
+              ) : filteredContacts.length ? (
+                filteredContacts.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => void handleStartDirect(p.id)}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg p-2.5 text-left hover:bg-muted transition-colors border border-transparent hover:border-border"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="relative">
+                        <Avatar className="h-9 w-9">
+                          <AvatarImage src={p.avatar_url ?? undefined} />
+                          <AvatarFallback>{initials(p.full_name)}</AvatarFallback>
+                        </Avatar>
+                        <span
+                          className={cn(
+                            "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card",
+                            livePresence(p) === "online" ? "bg-success" : "bg-muted-foreground/30",
+                          )}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <strong className="block truncate text-sm font-semibold">{p.full_name}</strong>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {livePresence(p) === "online" ? "Online" : "Offline"}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-md bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary hover:bg-primary hover:text-primary-foreground transition-colors">
+                      Conversar 💬
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <div className="px-4 py-12 text-center text-sm text-muted-foreground">
+                  Nenhum contato encontrado.
+                </div>
+              )
+            ) : membershipsError ? (
               <div className="space-y-3 px-4 py-8 text-center text-sm">
                 <p className="text-destructive">Não foi possível carregar suas conversas.</p>
                 <Button variant="outline" size="sm" onClick={() => void refetchMemberships()}>
-                  Tentar novamente
-                </Button>
-              </div>
-            ) : profilesError ? (
-              <div className="space-y-3 px-4 py-8 text-center text-sm">
-                <p className="text-destructive">Não foi possível carregar os funcionários.</p>
-                <Button variant="outline" size="sm" onClick={() => void refetchProfiles()}>
                   Tentar novamente
                 </Button>
               </div>
@@ -220,7 +358,7 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
                     key={m.conversation_id}
                     to="/chat/$conversationId"
                     params={{ conversationId: m.conversation_id }}
-                    className="flex items-center gap-3 rounded-md p-3 hover:bg-muted"
+                    className="flex items-center gap-3 rounded-lg p-3 hover:bg-muted transition-colors"
                     activeProps={{ className: "!bg-primary/10" }}
                   >
                     <ConversationAvatar
@@ -245,21 +383,39 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
                 );
               })
             ) : (
-              <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-                Nenhuma conversa encontrada.
+              <div className="px-4 py-10 text-center text-sm text-muted-foreground space-y-3">
+                <MessageCircle className="mx-auto h-8 w-8 text-muted-foreground/40" />
+                <p>Nenhuma conversa iniciada ainda.</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-2"
+                  onClick={() => setTab("contacts")}
+                >
+                  <Users className="h-4 w-4" />
+                  Ver contatos disponíveis
+                </Button>
               </div>
             )}
           </div>
         </ScrollArea>
       </aside>
-      <main className={cn("min-w-0", !conversationId && "hidden lg:grid lg:place-items-center")}>
+
+      <main className={cn("min-w-0 bg-card", !conversationId && "hidden lg:flex lg:items-center lg:justify-center")}>
         {conversationId && active && me?.profile ? (
           <Conversation
             conversation={active}
-            title={conversationTitle(active, allParticipants, me.profile.id)}
-            participants={allParticipants.filter((p) => p.conversation_id === conversationId)}
+            title={conversationTitle(active, currentParticipants, me.profile.id)}
+            participants={currentParticipants}
             me={me.profile}
           />
+        ) : conversationId && (directLoading || membershipsLoading || membershipsFetching) && !active ? (
+          <div className="grid h-full place-items-center p-8 text-center text-sm text-muted-foreground">
+            <div className="flex flex-col items-center gap-3">
+              <MessageCircle className="h-10 w-10 animate-pulse text-primary" />
+              <p>Carregando conversa...</p>
+            </div>
+          </div>
         ) : conversationId && membershipsError ? (
           <div className="grid h-full place-items-center p-8 text-center">
             <div>
@@ -269,10 +425,6 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
                 Tentar novamente
               </Button>
             </div>
-          </div>
-        ) : conversationId && membershipsFetching && !active ? (
-          <div className="grid h-full place-items-center p-8 text-center text-sm text-muted-foreground">
-            Carregando conversa...
           </div>
         ) : conversationId ? (
           <div className="grid h-full place-items-center p-8 text-center">
@@ -287,12 +439,90 @@ export function ChatWorkspace({ conversationId }: { conversationId?: string | un
             </div>
           </div>
         ) : (
-          <div className="p-8 text-center">
-            <MessageCircle className="mx-auto h-12 w-12 text-highlight" />
-            <h2 className="mt-4 font-bold">Suas conversas</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Escolha uma conversa ou inicie uma nova.
+          <div className="mx-auto max-w-lg p-6 sm:p-10 text-center">
+            <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-highlight/10 text-highlight">
+              <MessageCircle className="h-8 w-8" />
+            </div>
+            <h2 className="text-2xl font-bold">Mensagens Corporativas</h2>
+            <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+              Comunique-se diretamente com qualquer colega ou crie grupos para seus projetos e setores.
             </p>
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              <NewConversationDialog
+                profiles={otherProfiles}
+                userId={me?.profile?.id}
+                defaultType="direct"
+                trigger={
+                  <Button className="w-full gap-2 py-6 text-sm font-semibold shadow-sm">
+                    <MessageCircle className="h-5 w-5" />
+                    <span>Conversar com colega</span>
+                  </Button>
+                }
+              />
+              <NewConversationDialog
+                profiles={otherProfiles}
+                userId={me?.profile?.id}
+                defaultType="group"
+                trigger={
+                  <Button variant="outline" className="w-full gap-2 py-6 text-sm font-semibold">
+                    <Users className="h-5 w-5" />
+                    <span>Criar novo grupo</span>
+                  </Button>
+                }
+              />
+            </div>
+            {otherProfiles.length > 0 && (
+              <div className="mt-8 text-left rounded-xl border bg-muted/20 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Contatos rápidos:
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setTab("contacts")}
+                    className="text-xs font-medium text-primary hover:underline"
+                  >
+                    Ver todos ({otherProfiles.length})
+                  </button>
+                </div>
+                <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                  {otherProfiles.slice(0, 5).map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between gap-3 rounded-lg p-2 hover:bg-muted/60 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Avatar className="h-8 w-8">
+                          <AvatarImage src={p.avatar_url ?? undefined} />
+                          <AvatarFallback>{initials(p.full_name)}</AvatarFallback>
+                        </Avatar>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">{p.full_name}</p>
+                          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                            <span
+                              className={cn(
+                                "h-1.5 w-1.5 rounded-full",
+                                livePresence(p) === "online" ? "bg-success" : "bg-muted-foreground/40",
+                              )}
+                            />
+                            {livePresence(p) === "online" ? "Online" : "Offline"}
+                          </span>
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="gap-1.5 text-xs text-primary hover:bg-primary/10"
+                        onClick={() => void handleStartDirect(p.id)}
+                      >
+                        <Send className="h-3.5 w-3.5" />
+                        Conversar
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -785,27 +1015,70 @@ function Attachment({ message }: { message: MessageRow }) {
   );
 }
 
-function NewConversationDialog({
+export async function openOrCreateDirectChat({
+  peerId,
+  qc,
+  navigate,
+}: {
+  peerId: string;
+  qc: ReturnType<typeof useQueryClient>;
+  navigate: (opts: { to: string; params: { conversationId: string } }) => void;
+}) {
+  try {
+    const { data: conversationId, error } = await supabase.rpc("create_chat_conversation", {
+      _kind: "direct",
+      _name: "",
+      _members: [peerId],
+    });
+    if (error) throw error;
+    if (typeof conversationId !== "string" || !conversationId) {
+      throw new Error("Não foi possível iniciar a conversa.");
+    }
+    await qc.invalidateQueries({ queryKey: ["chat-conversations"] });
+    await qc.invalidateQueries({ queryKey: ["chat-participants"] });
+    navigate({ to: "/chat/$conversationId", params: { conversationId } });
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : "Não foi possível abrir o chat.");
+  }
+}
+
+export function NewConversationDialog({
   profiles,
   userId,
+  trigger,
+  defaultType = "direct",
 }: {
   profiles: ProfileLite[];
   userId: string | undefined;
+  trigger?: React.ReactNode;
+  defaultType?: "direct" | "group";
 }) {
   const [open, setOpen] = useState(false);
-  const [type, setType] = useState<"direct" | "group">("direct");
+  const [type, setType] = useState<"direct" | "group">(defaultType);
   const [selected, setSelected] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
   const qc = useQueryClient();
+
+  useEffect(() => {
+    if (open) {
+      setType(defaultType);
+      setSelected([]);
+      setName("");
+      setSearch("");
+    }
+  }, [open, defaultType]);
+
   const visible = profiles.filter((p) => p.full_name.toLowerCase().includes(search.toLowerCase()));
+
   function toggleGroupMember(id: string) {
     setSelected((current) =>
       current.includes(id) ? current.filter((x) => x !== id) : [...current, id],
     );
   }
+
   async function createConversation(kind: "direct" | "group", members: string[]) {
     if (!userId || !members.length || (kind === "group" && !name.trim())) return;
     setBusy(true);
@@ -830,52 +1103,64 @@ function NewConversationDialog({
       setBusy(false);
     }
   }
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="icon" aria-label="Nova conversa">
-          <Plus />
-        </Button>
+        {trigger ? (
+          trigger
+        ) : (
+          <Button size="icon" aria-label="Nova conversa">
+            <Plus />
+          </Button>
+        )}
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Nova conversa</DialogTitle>
+          <DialogTitle>
+            {type === "direct" ? "Iniciar conversa individual" : "Criar grupo corporativo"}
+          </DialogTitle>
           <DialogDescription>
             {type === "direct"
-              ? "Selecione um colaborador para abrir a conversa e enviar uma mensagem."
-              : "Selecione as pessoas e defina o nome do grupo corporativo."}
+              ? "Selecione um colega abaixo para abrir o chat imediatamente."
+              : "Defina o nome do grupo e selecione os participantes."}
           </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-2">
           <Button
+            type="button"
             variant={type === "direct" ? "default" : "outline"}
             onClick={() => {
               setType("direct");
               setSelected([]);
             }}
+            className="gap-2"
           >
-            <MessageCircle />
-            Individual
+            <MessageCircle className="h-4 w-4" />
+            Individual (1 a 1)
           </Button>
           <Button
+            type="button"
             variant={type === "group" ? "default" : "outline"}
             onClick={() => {
               setType("group");
               setSelected([]);
             }}
+            className="gap-2"
           >
-            <Users />
-            Grupo
+            <Users className="h-4 w-4" />
+            Grupo corporativo
           </Button>
         </div>
         {type === "group" && (
           <div className="space-y-1.5">
-            <Label>Nome do grupo</Label>
+            <Label htmlFor="group-name-input">Nome do grupo *</Label>
             <Input
+              id="group-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
               maxLength={120}
-              placeholder="Ex.: Equipe de Vendas"
+              placeholder="Ex.: Equipe de Vendas, Enfermagem Geral"
             />
           </div>
         )}
@@ -885,55 +1170,98 @@ function NewConversationDialog({
             className="pl-9"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar funcionário"
+            placeholder="Buscar colaborador..."
           />
         </div>
-        <ScrollArea className="h-64">
-          <div className="space-y-1 pr-3">
-            {visible.map((p) => (
-              <button
-                key={p.id}
-                onClick={() =>
-                  type === "direct"
-                    ? void createConversation("direct", [p.id])
-                    : toggleGroupMember(p.id)
-                }
-                disabled={busy}
-                aria-label={
-                  type === "direct" ? `Conversar com ${p.full_name}` : `Selecionar ${p.full_name}`
-                }
-                className="flex w-full items-center gap-3 rounded-md p-2 text-left hover:bg-muted"
-              >
-                {type === "group" ? (
-                  <Checkbox checked={selected.includes(p.id)} />
-                ) : (
-                  <MessageCircle className="h-4 w-4 shrink-0 text-highlight" />
-                )}
-                <Avatar className="h-8 w-8">
-                  <AvatarImage src={p.avatar_url ?? undefined} />
-                  <AvatarFallback>{initials(p.full_name)}</AvatarFallback>
-                </Avatar>
-                <span className="flex-1 text-sm font-medium">{p.full_name}</span>
-                <span
-                  className={cn(
-                    "h-2 w-2 rounded-full",
-                    livePresence(p) === "online" ? "bg-success" : "bg-muted-foreground/30",
-                  )}
-                />
-              </button>
-            ))}
-          </div>
-        </ScrollArea>
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">
+            {type === "direct"
+              ? "Clique no colaborador para conversar:"
+              : `Selecione os membros (${selected.length} selecionado${selected.length === 1 ? "" : "s"}):`}
+          </p>
+          <ScrollArea className="h-64 rounded-md border p-2">
+            <div className="space-y-1 pr-2">
+              {visible.length ? (
+                visible.map((p) => {
+                  const isSelected = selected.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() =>
+                        type === "direct"
+                          ? void createConversation("direct", [p.id])
+                          : toggleGroupMember(p.id)
+                      }
+                      disabled={busy}
+                      aria-label={
+                        type === "direct"
+                          ? `Conversar com ${p.full_name}`
+                          : `Selecionar ${p.full_name}`
+                      }
+                      className={cn(
+                        "flex w-full items-center justify-between gap-3 rounded-lg p-2 text-left transition-colors",
+                        type === "group" && isSelected
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-muted",
+                      )}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        {type === "group" ? (
+                          <Checkbox checked={isSelected} />
+                        ) : (
+                          <MessageCircle className="h-4 w-4 shrink-0 text-primary" />
+                        )}
+                        <Avatar className="h-8 w-8">
+                          <AvatarImage src={p.avatar_url ?? undefined} />
+                          <AvatarFallback>{initials(p.full_name)}</AvatarFallback>
+                        </Avatar>
+                        <div className="min-w-0">
+                          <span className="block truncate text-sm font-medium">{p.full_name}</span>
+                          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                            <span
+                              className={cn(
+                                "h-1.5 w-1.5 rounded-full",
+                                livePresence(p) === "online"
+                                  ? "bg-success"
+                                  : "bg-muted-foreground/30",
+                              )}
+                            />
+                            {livePresence(p) === "online" ? "Online" : "Offline"}
+                          </span>
+                        </div>
+                      </div>
+                      {type === "direct" && (
+                        <span className="shrink-0 rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                          Conversar 💬
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="p-4 text-center text-xs text-muted-foreground">
+                  Nenhum colaborador encontrado.
+                </div>
+              )}
+            </div>
+          </ScrollArea>
+        </div>
         {type === "direct" && busy ? (
-          <p role="status" className="text-center text-sm text-muted-foreground">
+          <p role="status" className="text-center text-sm font-medium text-primary animate-pulse">
             Abrindo conversa...
           </p>
         ) : type === "group" ? (
           <Button
+            type="button"
+            className="w-full gap-2 font-semibold"
             onClick={() => void createConversation("group", selected)}
             disabled={busy || !selected.length || !name.trim()}
           >
-            {busy ? "Criando..." : "Criar grupo"}
+            <Users className="h-4 w-4" />
+            {busy
+              ? "Criando grupo..."
+              : `Criar grupo com ${selected.length} participante(s)`}
           </Button>
         ) : null}
       </DialogContent>
